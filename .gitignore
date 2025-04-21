@@ -1,0 +1,7 @@
+*.o
+*.d
+*.su
+*.list
+*.map
+*.mk
+tags
