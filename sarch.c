@@ -41,6 +41,8 @@ struct cmd_options {
 
 const char msg_fwerr[] = "Error. Writing to output file failed";
 const char msg_merr[] = "Fatal: malloc error\n";
+const char msg_cerr[] = "Compress file is failed\n";
+const char msg_infempt[] = "Input file is empty\n";
 
 void memerr()
 {
@@ -51,8 +53,8 @@ void memerr()
 int write_in_file(const void *buf, int size, FILE *fd)
 {
     int bytes;
-    bytes = fwrite(buf, size, 1, fd);
-    if (bytes != 1)
+    bytes = fwrite(buf, 1, size, fd);
+    if (bytes != size)
         return 1;
     else
         return 0;
@@ -215,7 +217,7 @@ void printinfo(struct fileinfo *finfo)
     printf("Compressed size: %lu\n", finfo->cfsize);
 }
 
-void write_info(struct fileinfo *finfo, FILE *fd)
+int write_info(struct fileinfo *finfo, FILE *fd)
 {
     int res = 0;
     int i;
@@ -243,8 +245,7 @@ void write_info(struct fileinfo *finfo, FILE *fd)
 
     finfo->cfsize += finfo->chars_count + finfo->chars_count *
         sizeof(*(finfo->ctable));
-    if (res)
-        perror(msg_fwerr);
+    return res;
 }
 
 int write_code(FILE *fd, struct outbuf *buffer, const char *code)
@@ -257,7 +258,10 @@ int write_code(FILE *fd, struct outbuf *buffer, const char *code)
         buffer->count++;
         code++;
         if (buffer->count == 8) {
-            write_in_file(&buffer->byte, sizeof(buffer->byte), fd);
+            int result;
+            result = write_in_file(&buffer->byte, sizeof(buffer->byte), fd);
+            if (result)
+                return -1;
             byte_written++;
             buffer->count = 0;
             buffer->byte = 0;
@@ -266,38 +270,58 @@ int write_code(FILE *fd, struct outbuf *buffer, const char *code)
     return byte_written;
 }
 
-void write_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
+int write_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
 {
-    int res;
+    int res, value;
     struct outbuf buffer;
 
     buffer.count = 0;
     buffer.byte = 0;
     res = fseek(infd, 0, SEEK_SET);
-    if (res)
-        perror(msg_fwerr);
+    if (res) 
+        return 1;
 
-    while ((res = fgetc(infd)) != EOF) 
-        finfo->cfsize += write_code(outfd, &buffer, finfo->leafs[res]->code);
+    while ((value = fgetc(infd)) != EOF) { 
+        res = write_code(outfd, &buffer, finfo->leafs[value]->code);
+        if (res == -1)
+            return 1;
+        else
+            finfo->cfsize += res;
+    }
 
     if (buffer.count) {
-        write_in_file(&buffer.byte, sizeof(buffer.byte), outfd);
+        res = write_in_file(&buffer.byte, sizeof(buffer.byte), outfd);
+        if (res)
+            return 1;
         finfo->cfsize++;
     }
+    return 0;
 }
 
 int compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
 {
+    int result = 0;
+
     readfile(infd, finfo->ctable);
     calc_ufilesize(finfo);
+    if (finfo->ufsize == 0) {
+        fputs(msg_infempt, stderr);
+        return 2;
+    }
+
     calc_chars_count(finfo);
     create_tree_leafs(finfo);
     fill_leafs(finfo);
     build_tree(finfo);
     char_codes(*(finfo->stree));
-    write_info(finfo, outfd);
-    write_data(infd, outfd, finfo);
-    return 0;
+    result += write_info(finfo, outfd);
+    result += write_data(infd, outfd, finfo);
+    if (result) {
+        perror(msg_fwerr);
+        return 2;
+    } else {
+        return 0;
+    }
 }
 
 int processing(struct cmd_options *opts)
@@ -319,8 +343,11 @@ int processing(struct cmd_options *opts)
         return 1;
     }
 
-    if (opts->options == opt_compress)
+    if (opts->options == opt_compress) {
         result = compress_file(infd, outfd,  &finfo);
+        if (result)
+            fputs(msg_cerr, stderr);
+    }
     if (opts->options == opt_extract)
         fputs ("Extract file function is not released\n", stdout);
     fclose(infd);
