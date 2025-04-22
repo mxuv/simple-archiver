@@ -7,7 +7,6 @@
 enum {ctable_size       = 256};
 enum {char_code_len_max = 256};
 
-enum {options_count     = 2};
 enum {opt_compress      = 1 << 0};
 enum {opt_extract       = 1 << 1};
 
@@ -287,7 +286,7 @@ void write_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
     }
 }
 
-void compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
+int compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
 {
     readfile(infd, finfo->ctable);
     calc_ufilesize(finfo);
@@ -298,6 +297,35 @@ void compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
     char_codes(*(finfo->stree));
     write_info(finfo, outfd);
     write_data(infd, outfd, finfo);
+    return 0;
+}
+
+int processing(struct cmd_options *opts)
+{
+    struct fileinfo finfo;
+    FILE *infd, *outfd;
+    int result = 0;
+
+    init_finfo(&finfo);
+    infd = fopen(opts->input_fname, "r");
+    if (!infd) {
+        perror(opts->input_fname);
+        return 1;
+    }
+
+    outfd = fopen(opts->output_fname, "wb");
+    if (!outfd) {
+        perror(opts->output_fname);
+        return 1;
+    }
+
+    if (opts->options == opt_compress)
+        result = compress_file(infd, outfd,  &finfo);
+    if (opts->options == opt_extract)
+        fputs ("Extract file function is not released\n", stdout);
+    fclose(infd);
+    fclose(outfd);
+    return result;
 }
 
 void print_help()
@@ -366,6 +394,11 @@ int conflict_options(int options)
         return 0;
 }
 
+void init_opts(struct cmd_options *opts)
+{
+    memset(opts, 0, sizeof(struct cmd_options));
+}
+
 int parsing_opts(int argc, char **argv, struct cmd_options *opts)
 {
     int nopt = 1;
@@ -429,15 +462,8 @@ int parsing_opts(int argc, char **argv, struct cmd_options *opts)
     return 0;
 }
 
-void init_opts(struct cmd_options *opts)
-{
-    memset(opts, 0, sizeof(struct cmd_options));
-}
-
 int main(int argc, char **argv)
 {
-    FILE *infd, *outfd;
-    struct fileinfo finfo;
     struct cmd_options opts;
     int res;
 
@@ -446,22 +472,5 @@ int main(int argc, char **argv)
     if (res)
         return 1;
 
-    infd = fopen(opts.input_fname, "r");
-    if (!infd) {
-        perror(argv[2]);
-        return 1;
-    }
-
-    outfd = fopen(opts.output_fname, "wb");
-    if (!outfd) {
-        perror(argv[2]);
-        return 1;
-    }
-
-    init_finfo(&finfo);
-    compress_file(infd, outfd,  &finfo);
-    printinfo(&finfo);
-    fclose(infd);
-    fclose(outfd);
-    return 0;
+    return processing(&opts);
 } 
