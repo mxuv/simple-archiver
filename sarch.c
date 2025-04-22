@@ -2,13 +2,14 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define OPT_EXTRACT         1<<0
-#define OPT_COMPRESS        1<<1
-
 #define EXIT_MEMERR()       exit(5)
 
-enum {ctable_size = 256};
+enum {ctable_size       = 256};
 enum {char_code_len_max = 256};
+
+enum {options_count     = 2};
+enum {opt_compress      = 1 << 0};
+enum {opt_extract       = 1 << 1};
 
 struct node {
     int ch;
@@ -339,11 +340,30 @@ void print_nooptions()
         "Try -h for help\n", stderr);
 }
 
+void print_opts_conflict()
+{
+    fputs(
+        "Conflict options. One the following must be selected: \"-c -x\"\n"
+        "Try -h for help\n", stderr);
+}
+
 void print_noinput_file()
 {
     fputs(
         "No input or output file\n"
         "Nothing to do\n", stderr);
+}
+
+int conflict_options(int options)
+{
+    int result = 0;
+
+    result += options & opt_compress ? 1 : 0;
+    result += options & opt_extract ? 1 : 0;
+    if (result > 1)
+        return result;
+    else
+        return 0;
 }
 
 int parsing_opts(int argc, char **argv, struct cmd_options *opts)
@@ -361,10 +381,10 @@ int parsing_opts(int argc, char **argv, struct cmd_options *opts)
             }
             switch (argv[nopt][1]) {
                 case 'c':
-                    opts->options |= OPT_COMPRESS;
+                    opts->options |= opt_compress;
                     break;
                 case 'x':
-                    opts->options |= OPT_EXTRACT;
+                    opts->options |= opt_extract;
                     break;
                 case 'h':
                     print_help();
@@ -393,6 +413,11 @@ int parsing_opts(int argc, char **argv, struct cmd_options *opts)
 
     if (opts->input_fname == NULL || opts->output_fname == NULL) {
         print_noinput_file();
+        return 1;
+    }
+
+    if (conflict_options(opts->options)) {
+        print_opts_conflict();
         return 1;
     }
 
