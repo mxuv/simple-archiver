@@ -6,6 +6,7 @@
 
 enum {ctable_size       = 256};
 enum {char_code_len_max = 256};
+enum {sign_size         = 4};
 
 enum {opt_compress      = 1 << 0};
 enum {opt_extract       = 1 << 1};
@@ -42,6 +43,7 @@ struct cmd_options {
 const char msg_fwerr[] = "Error. Writing to output file failed";
 const char msg_merr[] = "Fatal: malloc error\n";
 const char msg_cerr[] = "Compress file is failed\n";
+const char msg_xerr[] = "Extract file is failed\n";
 const char msg_infempt[] = "Input file is empty\n";
 
 void memerr()
@@ -54,6 +56,16 @@ int write_in_file(const void *buf, int size, FILE *fd)
 {
     int bytes;
     bytes = fwrite(buf, 1, size, fd);
+    if (bytes != size)
+        return 1;
+    else
+        return 0;
+}
+
+int read_from_file(void *buf, int size, FILE *fd)
+{
+    int bytes;
+    bytes = fread(buf, 1, size, fd);
     if (bytes != size)
         return 1;
     else
@@ -223,7 +235,7 @@ int write_info(struct fileinfo *finfo, FILE *fd)
     int i;
 
     /* write signature */
-    res += write_in_file(".sar", 4, fd);
+    res += write_in_file(".sar", sign_size, fd);
     finfo->cfsize += 4;
 
     /* write uncompress size */
@@ -231,8 +243,8 @@ int write_info(struct fileinfo *finfo, FILE *fd)
     finfo->cfsize += sizeof(finfo->ufsize);
 
     /* write chars count */
-    res += write_in_file(&finfo->chars_count, sizeof(finfo->chars_count), fd);
-    finfo->cfsize += sizeof(finfo->chars_count);
+    res += write_in_file(&finfo->chars_count, 1, fd);
+    finfo->cfsize += 1;
 
     /* write chars table */
     for (i = 0; i < ctable_size; i++) {
@@ -298,6 +310,41 @@ int write_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
     return 0;
 }
 
+int read_info(FILE *infd, struct fileinfo *finfo)
+{
+    char str[5] = {0};
+    int i, result;
+
+    read_from_file(str, sign_size, infd);
+    result = strcmp(str, ".sar");
+    if (result) {
+        fputs ("Incorrect file signature\n", stderr);
+        return 1;
+    }
+
+    result += read_from_file(&(finfo->ufsize), sizeof(finfo->ufsize), infd);
+    result += read_from_file(&(finfo->chars_count), 1, infd);
+    if (finfo->chars_count == 0) {
+        fputs ("Incorrect header or corrupted file\n", stderr);
+        return 1;
+    }
+    for (i = 0; i < finfo->chars_count; i++) {
+        int tmp = 0;
+        result += read_from_file(&tmp, 1, infd);
+        result += read_from_file(&(finfo->ctable[tmp]),
+                sizeof(finfo->ctable[tmp]), infd);
+    } 
+    return result;
+}
+
+int extract_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
+{
+    int result = 0;
+
+    result = read_info(infd, finfo);
+    return result;
+}
+
 int compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
 {
     int result = 0;
@@ -344,12 +391,15 @@ int processing(struct cmd_options *opts)
     }
 
     if (opts->options == opt_compress) {
-        result = compress_file(infd, outfd,  &finfo);
+        result = compress_file(infd, outfd, &finfo);
         if (result)
             fputs(msg_cerr, stderr);
     }
-    if (opts->options == opt_extract)
-        fputs ("Extract file function is not released\n", stdout);
+    if (opts->options == opt_extract) {
+        result = extract_file(infd, outfd, &finfo);
+        if (result)
+            fputs(msg_xerr, stderr);
+    }
     fclose(infd);
     fclose(outfd);
     return result;
