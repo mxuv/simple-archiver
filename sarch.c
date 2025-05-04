@@ -6,11 +6,21 @@
 
 enum {ctable_size       = 256};
 enum {char_code_len_max = 256};
-enum {sign_size         = 4};
-enum {outbuf_size       = 8};
+enum {signature_size    = 4};
+enum {charbuf_size      = 8};
+
+enum {inbuf_size        = 8192};
+enum {outbuf_size       = 8192};
 
 enum {opt_compress      = 1 << 0};
 enum {opt_extract       = 1 << 1};
+
+enum {
+    f_ok    = 0,
+    f_eof   = 1,
+    f_err   = 2,
+    f_ovs   = 3
+};
 
 struct node {
     int ch;
@@ -30,7 +40,7 @@ struct fileinfo {
     int chars_count;
 };
 
-struct outbuf {
+struct codebuf {
     unsigned char byte;
     int count;
 };
@@ -39,6 +49,19 @@ struct cmd_options {
     int options;
     char *input_fname;
     char *output_fname;
+};
+
+struct io_buffer {
+    unsigned char *buffer;
+    int pos;
+};
+
+struct file {
+    FILE *fd;
+    char *fname;
+    struct io_buffer *ibuf;
+    struct io_buffer *outbuf;
+    int status;
 };
 
 const char msg_fwerr[] = "Writing to output file failed";
@@ -58,24 +81,98 @@ int write_in_file(const void *buf, int size, FILE *fd)
     int bytes;
     bytes = fwrite(buf, 1, size, fd);
     if (bytes != size)
-        return 1;
+        return f_err;
     else
-        return 0;
+        return f_ok;
 }
 
 int read_from_file(void *buf, int size, FILE *fd)
 {
     int bytes;
     bytes = fread(buf, 1, size, fd);
-    if (bytes != size)
-        return 1;
-    else
+    if (bytes != size) {
+        if (feof(fd))
+            return f_eof;
+        else
+            return f_err;
+    }
+    else {
+        return f_ok;
+    }
+}
+
+int write_buffer(struct file *f)
+{
+    int n;
+
+    if (f->outbuf->pos == 0) {
+        f->status = f_ok;
         return 0;
+    }
+
+    n = fwrite(f->outbuf->buffer, 1, f->outbuf->pos, f->fd);
+    if (n != f->outbuf->pos)
+        f->status = f_err;
+    else 
+        f->status = f_ok;
+
+    f->outbuf->pos -= n;
+    return n;
+}
+
+int add_to_file_buffer(struct file *f, const void *p, int size)
+{
+    int n;
+    while (size) {
+        n = outbuf_size - f->outbuf->pos;
+        if (n == 0) {
+            write_buffer(f);
+            if (f->status)
+                return 1;
+        }
+
+        if (size <= n) 
+            n = size;
+
+        memcpy(f->outbuf->buffer + f->outbuf->pos, p, n);
+        f->outbuf->pos += n;
+        size -=n;
+        p = (unsigned char*)p + n;
+    }
+    return 0;
+}
+
+int read_in_buffer(struct file *f, int count)
+{
+    int n;
+
+    n = fread(f->ibuf->buffer, 1, count, f->fd);
+    if (n != count) {
+        if (feof(f->fd))
+            f->status = f_eof;
+        else
+            f->status = f_err;
+    } else {
+        f->status = f_ok;
+    }
+
+    f->ibuf->pos = n;
+    return n;
 }
 
 void init_finfo(struct fileinfo *finfo)
 {
     memset(finfo, 0, sizeof(struct fileinfo));
+}
+
+void analyze_input_file(struct file *f, unsigned int *table)
+{
+    do {
+        int i;
+        read_in_buffer(f, inbuf_size);
+        for (i = 0; i < f->ibuf->pos; i++)
+            table[f->ibuf->buffer[i]]++;
+    } while (f->status != f_eof);
 }
 
 void readfile(FILE *fd, unsigned int *table)
@@ -230,29 +327,29 @@ void printinfo(struct fileinfo *finfo)
     printf("Compressed size: %lu\n", finfo->cfsize);
 }
 
-int write_info(struct fileinfo *finfo, FILE *fd)
+int write_info(struct fileinfo *finfo, struct file *f)
 {
     int res = 0;
     int i;
 
     /* write signature */
-    res += write_in_file(".sar", sign_size, fd);
+    res += add_to_file_buffer(f,".sar", signature_size);
     finfo->cfsize += 4;
 
     /* write uncompress size */
-    res += write_in_file(&finfo->ufsize, sizeof(finfo->ufsize), fd);
+    res += add_to_file_buffer(f, &finfo->ufsize, sizeof(finfo->ufsize));
     finfo->cfsize += sizeof(finfo->ufsize);
 
     /* write chars count */
-    res += write_in_file(&finfo->chars_count, 1, fd);
+    res += add_to_file_buffer(f, &finfo->chars_count, 1);
     finfo->cfsize += 1;
 
     /* write chars table */
     for (i = 0; i < ctable_size; i++) {
         if (finfo->ctable[i]) {
-            res += write_in_file(&i, 1, fd);
-            res += write_in_file(&finfo->ctable[i], 
-                sizeof(finfo->ctable[i]), fd);
+            res += add_to_file_buffer(f, &i, 1);
+            res += add_to_file_buffer(f, &finfo->ctable[i], 
+                sizeof(finfo->ctable[i]));
         }
     }
 
@@ -261,11 +358,10 @@ int write_info(struct fileinfo *finfo, FILE *fd)
     return res;
 }
 
-int write_code(FILE *fd, struct outbuf *buffer, const char *code)
+int write_code(struct file *f, struct codebuf *buffer, const char *code)
 {
     int byte_written = 0;
 
-    /* printf("input code: %s\n", code); */
     while (*code) {
         buffer->byte += *code - '0';
         buffer->count++;
@@ -274,8 +370,7 @@ int write_code(FILE *fd, struct outbuf *buffer, const char *code)
             buffer->byte = buffer->byte << 1;
         if (buffer->count == 8) {
             int result;
-            /* printf("output byte: %d\n", buffer->byte); */
-            result = write_in_file(&buffer->byte, sizeof(buffer->byte), fd);
+            result = add_to_file_buffer(f, &buffer->byte, sizeof(buffer->byte));
             if (result)
                 return -1;
             byte_written++;
@@ -286,28 +381,43 @@ int write_code(FILE *fd, struct outbuf *buffer, const char *code)
     return byte_written;
 }
 
-int write_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
+int write_data(struct file *fin, struct file *fout, struct fileinfo *finfo)
 {
-    int res, value;
-    struct outbuf buffer;
+    int res;
+    struct codebuf buffer;
 
     buffer.count = 0;
     buffer.byte = 0;
-    res = fseek(infd, 0, SEEK_SET);
+    fin->ibuf->pos = 0;
+    res = fseek(fin->fd, 0, SEEK_SET);
     if (res) 
         return 1;
 
-    while ((value = fgetc(infd)) != EOF) { 
-        res = write_code(outfd, &buffer, finfo->leafs[value]->code);
-        if (res == -1)
-            return 1;
-        else
-            finfo->cfsize += res;
-    }
+    do {
+        int i;
+        unsigned char c;
+
+        read_in_buffer(fin, inbuf_size);
+        for (i = 0; i < fin->ibuf->pos; i++) {
+            c = fin->ibuf->buffer[i];
+            res = write_code(fout, &buffer, finfo->leafs[c]->code);
+            if (res == -1)
+                return 1;
+            else
+                finfo->cfsize += res;
+        }
+    } while (fin->status != f_eof);
+    /* while ((value = fgetc(infd)) != EOF) {  */
+    /*     res = write_code(outfd, &buffer, finfo->leafs[value]->code); */
+    /*     if (res == -1) */
+    /*         return 1; */
+    /*     else */
+    /*         finfo->cfsize += res; */
+    /* } */
 
     if (buffer.count) {
         buffer.byte = buffer.byte << (8 - buffer.count - 1);
-        res = write_in_file(&buffer.byte, sizeof(buffer.byte), outfd);
+        res = add_to_file_buffer(fout, &buffer.byte, sizeof(buffer.byte));
         if (res)
             return 1;
         finfo->cfsize++;
@@ -320,7 +430,7 @@ int read_info(FILE *infd, struct fileinfo *finfo)
     char str[5] = {0};
     int i, result;
 
-    read_from_file(str, sign_size, infd);
+    read_from_file(str, signature_size, infd);
     result = strcmp(str, ".sar");
     if (result) {
         fputs ("Incorrect file signature\n", stderr);
@@ -349,26 +459,17 @@ int decode_byte(char byte, struct node **node, struct node *root, char *buf)
 
     count = 0;
     mbit = 1 << 7;
-    /* printf("Input byte: %d\n", (unsigned char)byte); */
-        /* printf("root: %p\n", root); */
     for (i = 0; i < 8; i++) {
-        /* printf("input node: %p\n", (*node)); */
-        if (byte & (mbit >> i)) {
+        if (byte & (mbit >> i))
             *node = (*node)->right;
-            /* printf("going right\n"); */
-        }
-        else {
+        else
             *node = (*node)->left;
-            /* printf("going left\n"); */
-        }
 
         if ((*node)->ch != -1) {
             *buf = (*node)->ch;
-            /* printf("Output byte: %d\n", *buf); */
             count++;
             buf++;
             *node = root;
-        /* printf("output node: %p\n", (*node)); */
         }
     } 
     return count;
@@ -381,7 +482,7 @@ int decode_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
     char tmp;
     struct node **node;
     struct node *root;
-    char outbuf[outbuf_size];
+    char charbuf[charbuf_size];
 
     rstat = 0;
     written_bytes = 0;
@@ -391,19 +492,14 @@ int decode_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
         int wstat, wbytes;
         rstat = read_from_file(&tmp, 1, infd); 
         if (rstat == 0) {
-            wbytes = decode_byte(tmp, node, root, outbuf);
-            /* printf("%d\n", wbytes);  */
-            /* int i; */
-            /* for (i = 0; i < wbytes; i++) */
-            /*     printf("%c ", outbuf[i]); */
-            /* printf("\n");  */
-
+            wbytes = decode_byte(tmp, node, root, charbuf);
             written_bytes += wbytes;
             if (written_bytes > finfo->ufsize) {
                 wbytes = wbytes - (written_bytes - finfo->ufsize);
             }
+
             if (wbytes) {
-                    wstat = write_in_file(outbuf, wbytes, outfd);
+                    wstat = write_in_file(charbuf, wbytes, outfd);
                 if (wstat) {
                     perror(msg_fwerr);
                     return 1;
@@ -415,26 +511,28 @@ int decode_data(FILE *infd, FILE *outfd, struct fileinfo *finfo)
     return 0;
 }
 
-int extract_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
+/* int extract_file(struct file *infd, struct file *outfd,  struct fileinfo *finfo) */
+/* { */
+/*     int result = 0; */
+/*  */
+/*     result += read_info(infd, finfo); */
+/*     if (result) */
+/*         return 1; */
+/*     create_tree_leafs(finfo); */
+/*     fill_leafs(finfo); */
+/*     build_tree(finfo); */
+/*     char_codes(*(finfo->stree)); */
+/*     result = decode_data(infd, outfd, finfo); */
+/*     return result; */
+/* } */
+
+int compress_file(struct file *fin, struct file *fout,  struct fileinfo *finfo)
 {
-    int result = 0;
+    int res = 0;
 
-    result += read_info(infd, finfo);
-    if (result)
-        return 1;
-    create_tree_leafs(finfo);
-    fill_leafs(finfo);
-    build_tree(finfo);
-    char_codes(*(finfo->stree));
-    result = decode_data(infd, outfd, finfo);
-    return result;
-}
-
-int compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
-{
-    int result = 0;
-
-    readfile(infd, finfo->ctable);
+    fputs("Analysing input file...\n", stdout);
+    analyze_input_file(fin, finfo->ctable);
+    fputs("Building tree...\n", stdout);
     calc_ufilesize(finfo);
     if (finfo->ufsize == 0) {
         fputs(msg_infempt, stderr);
@@ -446,9 +544,12 @@ int compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
     fill_leafs(finfo);
     build_tree(finfo);
     char_codes(*(finfo->stree));
-    result += write_info(finfo, outfd);
-    result += write_data(infd, outfd, finfo);
-    if (result) {
+    fputs("Writing header...\n", stdout);
+    res += write_info(finfo, fout);
+    fputs("Writing data...\n", stdout);
+    res += write_data(fin, fout, finfo);
+    write_buffer(fout);
+    if (fout->status || res) {
         perror(msg_fwerr);
         return 2;
     } else {
@@ -456,38 +557,62 @@ int compress_file(FILE *infd, FILE *outfd,  struct fileinfo *finfo)
     }
 }
 
+int open_file(struct file *fl, const char *mode)
+{
+    fl->fd = fopen(fl->fname, mode);
+    if (!fl->fd) {
+        perror(fl->fname);
+        return 1;
+    }
+    else {
+        return 0;
+    }
+}
+
 int processing(struct cmd_options *opts)
 {
+    struct file fin;
+    struct file fout;
     struct fileinfo finfo;
-    FILE *infd, *outfd;
+    struct io_buffer rbuf, wbuf;
+    unsigned char rmem[inbuf_size];
+    unsigned char wmem[outbuf_size];
     int result = 0;
 
-    init_finfo(&finfo);
-    infd = fopen(opts->input_fname, "r");
-    if (!infd) {
-        perror(opts->input_fname);
-        return 1;
-    }
+    rbuf.buffer = rmem;
+    rbuf.pos = 0;
+    wbuf.buffer = wmem;
+    wbuf.pos = 0;
 
-    outfd = fopen(opts->output_fname, "wb");
-    if (!outfd) {
-        perror(opts->output_fname);
+    fin.status = 0;
+    fin.fname = opts->input_fname;
+    fin.ibuf = &rbuf;
+    fout.status = 0;
+    fout.fname = opts->output_fname;
+    fout.outbuf = &wbuf;
+
+    init_finfo(&finfo);
+
+    result = open_file(&fin, "rb");
+    if (result)
         return 1;
-    }
+    result = open_file(&fout, "wb");
+    if (result)
+        return 1;
 
     if (opts->options == opt_compress) {
-        result = compress_file(infd, outfd, &finfo);
+        result = compress_file(&fin, &fout, &finfo);
         if (result)
             fputs(msg_cerr, stderr);
     }
-    if (opts->options == opt_extract) {
-        result = extract_file(infd, outfd, &finfo);
-        if (result)
-            fputs(msg_xerr, stderr);
-    }
-    printinfo(&finfo);
-    fclose(infd);
-    fclose(outfd);
+    /* if (opts->options == opt_extract) { */
+    /*     result = extract_file(&fin, &fout, &finfo); */
+    /*     if (result) */
+    /*         fputs(msg_xerr, stderr); */
+    /* } */
+    fclose(fin.fd);
+    fclose(fout.fd);
+    fputs("Complete.\n", stdout);
     return result;
 }
 
