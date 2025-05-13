@@ -162,14 +162,18 @@ int read_in_buffer(struct file *f, int count)
     return n;
 }
 
-void file_buffer_pop(struct file *f, void *p, size_t size)
+int file_buffer_pop(struct file *f, void *p, size_t size)
 {
     size_t n;
+    int rb;
 
     while (size) {
         n = f->ibuf->posl - f->ibuf->posf;
-        if (n == 0)
-            read_in_buffer(f, inbuf_size);
+        if (n == 0) {
+            rb = read_in_buffer(f, inbuf_size);
+            if (rb == 0)
+                return 1;
+        }
 
         if (size <=n)
             n = size;
@@ -179,6 +183,7 @@ void file_buffer_pop(struct file *f, void *p, size_t size)
         size -= n;
         p = (unsigned char*)p + n;
     }
+    return 0;
 }
 
 void init_finfo(struct fileinfo *finfo)
@@ -499,6 +504,7 @@ int decode_data(struct file *fin, struct file *fout, struct fileinfo *finfo)
 {
     unsigned long written_bytes;
     char tmp;
+    int rstat;
     struct node **node;
     struct node *root;
     char charbuf[charbuf_size];
@@ -506,9 +512,8 @@ int decode_data(struct file *fin, struct file *fout, struct fileinfo *finfo)
     written_bytes = 0;
     node = finfo->stree;
     root = (*finfo->stree);
-    do {
+    while ((rstat = file_buffer_pop(fin, &tmp, 1)) == 0) {
         int wbytes;
-        file_buffer_pop(fin, &tmp, 1);
         wbytes = decode_byte(tmp, node, root, charbuf);
         written_bytes += wbytes;
         if (written_bytes > finfo->ufsize) {
@@ -517,32 +522,28 @@ int decode_data(struct file *fin, struct file *fout, struct fileinfo *finfo)
 
         if (wbytes) {
             file_buffer_push(fout, charbuf, wbytes);
-            if (fout->status) {
-                perror(msg_fwerr);
+            if (fout->status)
                 return 1;
-            }
         }
-    } while (fin->status != f_eof);
-
-    write_buffer(fout);
-    if (fout->status) {
-        perror(msg_fwerr);
-        return 1;
     }
+
     return 0;
 }
 
 int extract_file(struct file *fin, struct file *fout,  struct fileinfo *finfo)
 {
-    int result = 0;
-    result += read_info(fin, finfo);
+    int result;
+    result = read_info(fin, finfo);
     if (result)
         return 1;
     create_tree_leafs(finfo);
     fill_leafs(finfo);
     build_tree(finfo);
     char_codes(*(finfo->stree));
-    result += decode_data(fin, fout, finfo);
+    result = decode_data(fin, fout, finfo);
+    write_buffer(fout);
+    if (fout->status || result)
+        perror(msg_fwerr);
     return result;
 }
 
@@ -550,9 +551,7 @@ int compress_file(struct file *fin, struct file *fout,  struct fileinfo *finfo)
 {
     int res = 0;
 
-    fputs("Analysing input file...\n", stdout);
     analyze_input_file(fin, finfo->ctable);
-    fputs("Building tree...\n", stdout);
     calc_ufilesize(finfo);
     if (finfo->ufsize == 0) {
         fputs(msg_infempt, stderr);
@@ -564,9 +563,7 @@ int compress_file(struct file *fin, struct file *fout,  struct fileinfo *finfo)
     fill_leafs(finfo);
     build_tree(finfo);
     char_codes(*(finfo->stree));
-    fputs("Writing header...\n", stdout);
     res += write_info(finfo, fout);
-    fputs("Writing data...\n", stdout);
     res += write_data(fin, fout, finfo);
     write_buffer(fout);
     if (fout->status || res) {
@@ -589,6 +586,13 @@ int open_file(struct file *fl, const char *mode)
     }
 }
 
+void buffer_init(struct io_buffer *buffer, unsigned char *mem)
+{
+    buffer->buffer = mem;
+    buffer->posl = 0;
+    buffer->posf = 0;
+}
+
 int processing(struct cmd_options *opts)
 {
     struct file fin;
@@ -599,12 +603,8 @@ int processing(struct cmd_options *opts)
     unsigned char wmem[outbuf_size];
     int result = 0;
 
-    rbuf.buffer = rmem;
-    rbuf.posl = 0;
-    rbuf.posf = 0;
-    wbuf.buffer = wmem;
-    wbuf.posl = 0;
-    wbuf.posf = 0;
+    buffer_init(&rbuf, rmem);
+    buffer_init(&wbuf, wmem);
 
     fin.status = 0;
     fin.fname = opts->input_fname;
@@ -634,7 +634,6 @@ int processing(struct cmd_options *opts)
     }
     fclose(fin.fd);
     fclose(fout.fd);
-    fputs("Complete.\n", stdout);
     return result;
 }
 
