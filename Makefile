@@ -6,7 +6,7 @@ CFLAGS = -g -Wall -Wextra -Wpedantic
 
 NAME = sarch
 SRC = sarch.c 
-OBJ = $(SRC1:.c=.o)
+OBJ = $(SRC:.c=.o)
 
 CLN = *.mk *.o $(NAME)
 
@@ -15,7 +15,7 @@ all: $(NAME)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(NAME1): $(OBJ)
+$(NAME): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
 deps.mk: $(SRC)
