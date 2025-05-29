@@ -367,8 +367,8 @@ int write_info(struct fileinfo *finfo, struct file *f)
     finfo->cfsize += sizeof(finfo->ufsize);
 
     /* write chars count */
-    res += file_buffer_push(f, &finfo->chars_count, 1);
-    finfo->cfsize += 1;
+    res += file_buffer_push(f, &finfo->chars_count, 2);
+    finfo->cfsize += 2;
 
     /* write chars table */
     for (i = 0; i < ctable_size; i++) {
@@ -464,7 +464,7 @@ int read_info(struct file *fin, struct fileinfo *finfo)
     }
 
     file_buffer_pop(fin, &(finfo->ufsize), sizeof(finfo->ufsize));
-    file_buffer_pop(fin, &(finfo->chars_count), 1);
+    file_buffer_pop(fin, &(finfo->chars_count), 2);
     if (finfo->chars_count == 0) {
         fputs ("Incorrect header or corrupted file\n", stderr);
         return 1;
